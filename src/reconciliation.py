@@ -23,29 +23,49 @@ def reconcile(
     file_b_label: str,
 ) -> pd.DataFrame:
     """
-    compare_pairs: list of dicts {"alias": ..., "col_a": ..., "col_b": ...}
+    Reconcile two datasets using user-selected key columns.
 
-    Returns a DataFrame with columns:
-        key, status, mismatch_columns,
-        <alias>_<file_a_label>, <alias>_<file_b_label> for each compared column
+    compare_pairs contains dictionaries like:
+        {"alias": "quantity", "col_a": "quantity", "col_b": "quantity"}
+
+    The key column is used only for matching records, not as a comparison
+    field.
     """
     a = df_a.copy()
     b = df_b.copy()
 
-    # Rename the key columns to a common name for the merge
+    # Rename the selected key columns to a common internal name.
     a = a.rename(columns={key_col_a: "_key"})
     b = b.rename(columns={key_col_b: "_key"})
 
-    # Keep only the key + compared columns from each side to keep this focused
-    a_cols = ["_key"] + [p["col_a"] for p in compare_pairs]
-    b_cols = ["_key"] + [p["col_b"] for p in compare_pairs]
-    a_small = a[a_cols].add_suffix(f"__{file_a_label}")
-    a_small = a_small.rename(columns={f"_key__{file_a_label}": "_key"})
-    b_small = b[b_cols].add_suffix(f"__{file_b_label}")
-    b_small = b_small.rename(columns={f"_key__{file_b_label}": "_key"})
+    # Never treat the reconciliation key as a comparison column.
+    valid_pairs = [
+        pair
+        for pair in compare_pairs
+        if pair["col_a"] != key_col_a and pair["col_b"] != key_col_b
+    ]
 
+    # Keep only the key + actual comparison columns.
+    a_cols = ["_key"] + [pair["col_a"] for pair in valid_pairs]
+    b_cols = ["_key"] + [pair["col_b"] for pair in valid_pairs]
+
+    a_small = a[a_cols].add_suffix(f"__{file_a_label}")
+    a_small = a_small.rename(
+        columns={f"_key__{file_a_label}": "_key"}
+    )
+
+    b_small = b[b_cols].add_suffix(f"__{file_b_label}")
+    b_small = b_small.rename(
+        columns={f"_key__{file_b_label}": "_key"}
+    )
+
+    # Match records from both datasets.
     merged = pd.merge(
-        a_small, b_small, on="_key", how="outer", indicator=True
+        a_small,
+        b_small,
+        on="_key",
+        how="outer",
+        indicator=True,
     )
 
     statuses = []
@@ -53,20 +73,24 @@ def reconcile(
 
     for _, row in merged.iterrows():
         indicator = row["_merge"]
+
         if indicator == "left_only":
             statuses.append(f"MISSING_FROM_{file_b_label.upper()}")
             mismatch_cols_list.append(None)
             continue
+
         if indicator == "right_only":
             statuses.append(f"MISSING_FROM_{file_a_label.upper()}")
             mismatch_cols_list.append(None)
             continue
 
-        # present in both -> compare each column
+        # Record exists in both files: compare selected fields.
         mismatched = []
-        for pair in compare_pairs:
+
+        for pair in valid_pairs:
             col_a_name = f"{pair['col_a']}__{file_a_label}"
             col_b_name = f"{pair['col_b']}__{file_b_label}"
+
             if not _values_equal(row[col_a_name], row[col_b_name]):
                 mismatched.append(pair["alias"])
 
@@ -79,15 +103,18 @@ def reconcile(
 
     merged["status"] = statuses
     merged["mismatch_columns"] = mismatch_cols_list
+
     merged = merged.drop(columns=["_merge"])
     merged = merged.rename(columns={"_key": "key"})
 
-    # Put status columns right after the key for readability
+    # Put status information immediately after the key.
     ordered_cols = ["key", "status", "mismatch_columns"] + [
-        c for c in merged.columns if c not in ("key", "status", "mismatch_columns")
+        col
+        for col in merged.columns
+        if col not in ("key", "status", "mismatch_columns")
     ]
-    return merged[ordered_cols]
 
+    return merged[ordered_cols]
 
 def summarize(results_df: pd.DataFrame) -> pd.Series:
     return results_df["status"].value_counts()
